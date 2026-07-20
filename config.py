@@ -123,8 +123,11 @@ class IndexConfig:
 INDICES: tuple[IndexConfig, ...] = (
     IndexConfig("nifty", "Nifty 50", "nse_cm", "NIFTY", "nse_fo", strike_step=50),
     IndexConfig("banknifty", "Nifty Bank", "nse_cm", "BANKNIFTY", "nse_fo", strike_step=100),
-    IndexConfig("finnifty", "Nifty Fin Service", "nse_cm", "FINNIFTY", "nse_fo", strike_step=50),
-    IndexConfig("midcpnifty", "NIFTY MID SELECT", "nse_cm", "MIDCPNIFTY", "nse_fo", strike_step=25),
+    # FINNIFTY and MIDCPNIFTY removed from collection (2026-07-20) to cut
+    # per-cycle API call volume and bring real collection cadence back
+    # toward the configured 60s interval. Re-add here if needed later:
+    #   IndexConfig("finnifty", "Nifty Fin Service", "nse_cm", "FINNIFTY", "nse_fo", strike_step=50),
+    #   IndexConfig("midcpnifty", "NIFTY MID SELECT", "nse_cm", "MIDCPNIFTY", "nse_fo", strike_step=25),
     # SENSEX is optional — flip collect_* to True if your subscription covers BSE.
     IndexConfig(
         "sensex", "SENSEX", "bse_cm", "SENSEX", "bse_fo",
