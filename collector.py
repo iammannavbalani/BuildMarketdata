@@ -147,29 +147,66 @@ class InstrumentCache:
 
         return out
 
+    # Seconds between 1970-01-01 and 1980-01-01: Kotak's scrip master
+    # stores numeric expiries as an epoch based at 1980 (an NSE
+    # convention), NOT the Unix 1970 epoch. Parsing them as Unix epochs
+    # yields dates exactly ~10 years in the past (e.g. 2016-07-28 for a
+    # real 2026-07-28 expiry) — which is precisely the corruption
+    # observed in production data before this fix.
+    _EPOCH_1980_OFFSET_S = 315_532_800
+
     @classmethod
     def _parse_expiry_column(cls, col: pd.Series) -> pd.Series:
         """
-        Parse Kotak's expiry date strings using the confirmed-working
-        format list, trying each in turn rather than pandas' generic
-        auto-parser (which can silently misread ambiguous formats, e.g.
-        a 2-digit year, and produce a wildly wrong — but valid-looking —
-        date). Anything that still can't be parsed, or parses to a date
-        clearly in the past, is left as NaT (excluded) rather than guessed.
+        Parse Kotak scrip-master expiries, which appear in two forms
+        depending on segment/file version:
+
+        * numeric — seconds since 1980-01-01 (NSE convention). Handled
+          by shifting onto the Unix epoch. As a safety net, if a value
+          only makes sense as a plain 1970-based epoch, that reading is
+          used instead (whichever lands in a plausible listing window).
+        * text — date strings in the formats confirmed working in the
+          neogreeks project ("30-Jul-2026" etc.).
+
+        Values that can't be parsed, or that parse to already-expired
+        dates, become NaT and are excluded from instrument resolution —
+        better to skip a row than fetch a dead contract.
         """
         result = pd.Series(pd.NaT, index=col.index, dtype="datetime64[ns]")
-        text = col.astype(str)
-        for fmt in cls._EXPIRY_FORMATS:
-            mask = result.isna()
-            if not mask.any():
-                break
-            result.loc[mask] = pd.to_datetime(text[mask], format=fmt, errors="coerce")
-        mask = result.isna()
-        if mask.any():
-            result.loc[mask] = pd.to_datetime(text[mask], errors="coerce")
+        text = col.astype(str).str.strip()
+        today = pd.Timestamp(utils.today_ist())
+        lo, hi = today - pd.Timedelta(days=1), today + pd.Timedelta(days=5 * 365)
 
-        cutoff = pd.Timestamp(utils.today_ist()) - pd.Timedelta(days=1)
-        return result.where(result >= cutoff)
+        # -- numeric epochs ------------------------------------------------
+        num = pd.to_numeric(text, errors="coerce")
+        num_mask = num.notna()
+        if num_mask.any():
+            as_1980 = pd.to_datetime(
+                num[num_mask] + cls._EPOCH_1980_OFFSET_S, unit="s", errors="coerce"
+            )
+            as_1970 = pd.to_datetime(num[num_mask], unit="s", errors="coerce")
+            # Prefer the 1980-based reading; fall back to 1970 only when
+            # 1980 lands outside a plausible listing window but 1970 fits.
+            pick = as_1980.where(
+                as_1980.between(lo, hi) | ~as_1970.between(lo, hi), as_1970
+            )
+            result.loc[num_mask] = pick
+
+        # -- text dates ----------------------------------------------------
+        txt_mask = ~num_mask
+        if txt_mask.any():
+            for fmt in cls._EXPIRY_FORMATS:
+                mask = txt_mask & result.isna()
+                if not mask.any():
+                    break
+                result.loc[mask] = pd.to_datetime(text[mask], format=fmt, errors="coerce")
+            mask = txt_mask & result.isna()
+            if mask.any():
+                result.loc[mask] = pd.to_datetime(text[mask], errors="coerce")
+
+        # Normalise away any time-of-day component and drop expired rows.
+        result = result.dt.normalize()
+        return result.where(result >= lo)
 
     # -- resolution --------------------------------------------------------
     def spot_token(self, idx: IndexConfig) -> dict[str, str] | None:
