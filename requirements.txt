@@ -1,0 +1,19 @@
+# Core
+pandas>=2.2
+neo_api_client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.1
+pyotp>=2.9  # generates the TOTP 2FA code from KOTAK_TOTP_SECRET
+
+# API server (Railway)
+fastapi>=0.111
+uvicorn[standard]>=0.30
+
+# Optional daily Google Drive backup (only used if DRIVE_BACKUP_ENABLED=1)
+google-api-python-client>=2.130
+google-auth>=2.30
+
+# Optional future support (Parquet export / DuckDB backend)
+pyarrow>=16.0
+
+# Scheduling is implemented natively (minute-boundary alignment), but
+# APScheduler is listed for future cron-style jobs (archival, EOD tasks).
+APScheduler>=3.10

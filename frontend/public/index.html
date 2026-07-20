@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MarketData Collector</title>
+<style>
+  :root{--bg:#0f1420;--card:#1a2233;--text:#e8ecf4;--muted:#8b96ad;
+        --ok:#34d399;--bad:#f87171;--warn:#fbbf24;--accent:#60a5fa;--border:#2a3550}
+  *{box-sizing:border-box;margin:0}
+  body{background:var(--bg);color:var(--text);
+       font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px}
+  h1{font-size:20px;margin-bottom:4px}
+  .sub{color:var(--muted);margin-bottom:20px}
+  .row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--border);
+        border-radius:10px;padding:16px;min-width:170px;flex:1}
+  .card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  .card .v{font-size:22px;font-weight:600;margin-top:4px}
+  .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+  .panel{background:var(--card);border:1px solid var(--border);
+         border-radius:10px;padding:16px;margin-bottom:16px}
+  .panel h2{font-size:15px;margin-bottom:12px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);
+        white-space:nowrap}
+  th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--card)}
+  .scroll{overflow:auto;max-height:420px}
+  select,input,button{background:#111827;color:var(--text);border:1px solid var(--border);
+        border-radius:6px;padding:7px 10px;font-size:13px}
+  button{cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#0b1020;font-weight:600}
+  a{color:var(--accent);text-decoration:none}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  .muted{color:var(--muted)}
+  #err{color:var(--bad);margin:8px 0;display:none;white-space:pre-wrap}
+</style>
+</head>
+<body>
+  <h1>MarketData Collector</h1>
+  <div class="sub">Kotak Neo raw data capture — health &amp; saved data</div>
+
+  <div class="panel">
+    <div class="toolbar">
+      <input id="apiBase" size="42" placeholder="API base URL (https://xxx.up.railway.app)">
+      <input id="apiKey" size="24" placeholder="X-API-Key (optional)" type="password">
+      <button class="primary" onclick="saveCfg()">Connect</button>
+      <span class="muted" id="lastRefresh"></span>
+    </div>
+    <div id="err"></div>
+  </div>
+
+  <div class="row" id="statusCards"></div>
+
+  <div class="panel">
+    <h2>Daily metadata</h2>
+    <div class="scroll"><table id="metaTable"></table></div>
+  </div>
+
+  <div class="panel">
+    <h2>Saved data browser</h2>
+    <div class="toolbar">
+      <select id="daySel" onchange="loadFiles()"></select>
+      <select id="fileSel"></select>
+      <input id="tailN" type="number" value="50" min="1" max="5000" style="width:80px" title="rows">
+      <button onclick="previewFile()">Preview last N rows</button>
+      <button onclick="downloadFile()">Download CSV</button>
+    </div>
+    <div class="scroll"><table id="dataTable"></table></div>
+  </div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let cfg = { base: localStorage.getItem("apiBase") || "",
+            key:  localStorage.getItem("apiKey")  || "" };
+
+function saveCfg(){
+  cfg.base = $("apiBase").value.trim().replace(/\/+$/,"");
+  cfg.key  = $("apiKey").value.trim();
+  localStorage.setItem("apiBase", cfg.base);
+  localStorage.setItem("apiKey",  cfg.key);
+  refreshAll();
+}
+
+async function api(path){
+  const r = await fetch(cfg.base + path,
+      { headers: cfg.key ? {"X-API-Key": cfg.key} : {} });
+  if(!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+  return r.json();
+}
+function showErr(e){ $("err").style.display="block"; $("err").textContent = String(e); }
+function clearErr(){ $("err").style.display="none"; }
+
+function card(k, v, cls=""){ return `<div class="card"><div class="k">${k}</div>
+  <div class="v ${cls}">${v}</div></div>`; }
+
+async function refreshStatus(){
+  const s = await api("/status");
+  const m = s.metadata || {};
+  $("statusCards").innerHTML =
+    card("Collector", s.collector_running ? "RUNNING" : "STOPPED",
+         s.collector_running ? "ok" : "bad") +
+    card("In session", s.in_trading_session ? "YES" : "NO",
+         s.in_trading_session ? "ok" : "muted") +
+    card("Records today", m.total_records ?? "—") +
+    card("Missing", m.missing_data_count ?? "—",
+         (m.missing_data_count||0) > 0 ? "warn" : "") +
+    card("Reconnects", m.reconnect_count ?? "—",
+         (m.reconnect_count||0) > 0 ? "warn" : "") +
+    card("Requests", m.total_requests ?? "—") +
+    card("Skipped min", m.skipped_minutes ?? "—",
+         (m.skipped_minutes||0) > 0 ? "warn" : "");
+  $("metaTable").innerHTML = Object.entries(m)
+    .map(([k,v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("")
+    || `<tr><td class="muted">No metadata yet today.</td></tr>`;
+  $("lastRefresh").textContent = "Updated " + new Date().toLocaleTimeString();
+}
+
+async function loadDays(){
+  const d = await api("/days");
+  $("daySel").innerHTML = d.days.map(x=>`<option>${x}</option>`).join("");
+  if(d.days.length) await loadFiles();
+}
+
+async function loadFiles(){
+  const day = $("daySel").value;
+  if(!day) return;
+  const f = await api(`/days/${day}/files`);
+  $("fileSel").innerHTML = f.files
+    .map(x=>`<option value="${x.name}">${x.name} (${(x.size_bytes/1048576).toFixed(1)} MB)</option>`)
+    .join("");
+}
+
+async function previewFile(){
+  try{
+    clearErr();
+    const day=$("daySel").value, file=$("fileSel").value, n=$("tailN").value;
+    if(!file) return;
+    if(file.endsWith(".json")){
+      const meta = await api(`/days/${day}/files/${file}`);
+      $("dataTable").innerHTML = Object.entries(meta)
+        .map(([k,v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+      return;
+    }
+    const t = await api(`/days/${day}/files/${file}/tail?n=${n}`);
+    if(!t.rows.length){ $("dataTable").innerHTML =
+      `<tr><td class="muted">Empty file.</td></tr>`; return; }
+    const cols = Object.keys(t.rows[0]);
+    $("dataTable").innerHTML =
+      "<tr>" + cols.map(c=>`<th>${c}</th>`).join("") + "</tr>" +
+      t.rows.map(r=>"<tr>"+cols.map(c=>`<td>${r[c]??""}</td>`).join("")+"</tr>").join("");
+  }catch(e){ showErr(e); }
+}
+
+function downloadFile(){
+  const day=$("daySel").value, file=$("fileSel").value;
+  if(!file) return;
+  // Note: header auth doesn't apply to plain navigation; if API_KEY is set,
+  // fetch as blob instead.
+  fetch(`${cfg.base}/days/${day}/files/${file}`,
+        { headers: cfg.key ? {"X-API-Key": cfg.key} : {} })
+    .then(r => r.blob())
+    .then(b => { const a=document.createElement("a");
+      a.href=URL.createObjectURL(b); a.download=`${day}_${file}`; a.click(); })
+    .catch(showErr);
+}
+
+async function refreshAll(){
+  if(!cfg.base) return;
+  try{ clearErr(); await refreshStatus(); await loadDays(); }
+  catch(e){ showErr(e); }
+}
+
+$("apiBase").value = cfg.base;
+$("apiKey").value  = cfg.key;
+refreshAll();
+setInterval(()=>{ if(cfg.base) refreshStatus().catch(showErr); }, 30000);
+</script>
+</body>
+</html>

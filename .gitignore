@@ -1,0 +1,17 @@
+# Never commit collected data or logs
+data/
+logs/
+archive/
+
+# Never commit secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Firebase
+frontend/.firebase/
+frontend/node_modules/

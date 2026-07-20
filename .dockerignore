@@ -1,0 +1,8 @@
+data/
+logs/
+archive/
+__pycache__/
+*.pyc
+.venv/
+frontend/
+.git/
