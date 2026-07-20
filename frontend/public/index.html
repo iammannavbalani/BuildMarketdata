@@ -66,6 +66,7 @@
       <button onclick="previewFile()">Preview last N rows</button>
       <button onclick="downloadFile()">Download CSV</button>
       <button class="primary" onclick="downloadDayZip()">Download All (ZIP)</button>
+      <button style="border-color:var(--bad);color:var(--bad)" onclick="deleteDay()">Delete this day's data</button>
     </div>
     <div class="scroll"><table id="dataTable"></table></div>
   </div>
@@ -175,6 +176,24 @@ function downloadDayZip(){
     .then(b => { const a=document.createElement("a");
       a.href=URL.createObjectURL(b); a.download=`marketdata_${day}.zip`; a.click(); })
     .catch(showErr);
+}
+
+async function deleteDay(){
+  const day = $("daySel").value;
+  if(!day) return;
+  if(!confirm(`Permanently delete ALL data for ${day}? This cannot be undone.`)) return;
+  if(!confirm(`Really sure? Type-check: this deletes every CSV for ${day} on the server.`)) return;
+  try{
+    clearErr();
+    const r = await fetch(`${cfg.base}/days/${day}`, {
+      method: "DELETE",
+      headers: cfg.key ? {"X-API-Key": cfg.key} : {},
+    });
+    if(!r.ok) throw new Error(`delete → HTTP ${r.status}`);
+    const j = await r.json();
+    alert(`Deleted ${j.files_removed} file(s) for ${day}.`);
+    await loadDays();
+  }catch(e){ showErr(e); }
 }
 
 async function refreshAll(){

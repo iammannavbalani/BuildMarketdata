@@ -15,6 +15,7 @@ GET /days/{date}/files               files + sizes for one day
 GET /days/{date}/files/{name}        download a CSV / metadata.json
 GET /days/{date}/files/{name}/tail   last N rows as JSON (dashboard tables)
 GET /days/{date}/zip                 download every file for the day as one .zip
+DELETE /days/{date}                  permanently delete a day's entire folder
 
 Security: set the API_KEY env var to require an ``X-API-Key`` header on
 every endpoint except /health. CORS origins come from API_CORS_ORIGINS.
@@ -92,7 +93,7 @@ app.add_middleware(
     # OPTIONS requests itself, but returns 400 if the browser's requested
     # method isn't in this list — OPTIONS must be listed even though we
     # never route it ourselves.
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "DELETE", "OPTIONS"],
     allow_headers=["X-API-Key", "Content-Type"],
 )
 
@@ -208,6 +209,35 @@ def list_files(day: str) -> dict[str, Any]:
         if f.is_file()
     ]
     return {"day": day, "files": files}
+
+
+@app.delete("/days/{day}", dependencies=[Depends(require_api_key)])
+def delete_day(day: str) -> dict[str, Any]:
+    """
+    Permanently delete an entire day's folder (all CSVs + metadata.json)
+    from the Railway volume — for discarding a bad/test day's data.
+    Irreversible; there is no confirmation step at the API layer, the
+    dashboard button is expected to confirm before calling this.
+    """
+    import shutil
+
+    d = _day_dir(day)
+    file_count = sum(1 for f in d.iterdir() if f.is_file())
+    shutil.rmtree(d)
+    log.warning("Deleted data folder for %s (%d files)", day, file_count)
+
+    # If this is the currently-active collection day, force the storage
+    # layer to drop its open file handles rather than silently keep
+    # writing into the now-unlinked files — any collection that resumes
+    # today will cleanly recreate fresh CSVs with headers.
+    if _scheduler is not None and str(_scheduler._current_day) == day:
+        try:
+            _scheduler.storage.rotate_day(_scheduler._current_day)
+            log.info("Reset storage handles for %s after deletion", day)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failed to reset storage handles post-delete: %s", exc)
+
+    return {"day": day, "deleted": True, "files_removed": file_count}
 
 
 @app.get("/days/{day}/files/{name}", dependencies=[Depends(require_api_key)])
