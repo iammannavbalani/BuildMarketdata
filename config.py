@@ -117,7 +117,15 @@ class IndexConfig:
     # How many nearest expiries of the option chain to collect.
     # 0 means "all available expiries".
     option_expiries: int = 2
-    strike_step: int = 50     # informational; used for validation only
+    strike_step: int = 50     # spacing between listed strikes for this index
+
+
+# Number of strikes to collect on each side of the ATM strike (ATM itself
+# always included), per expiry — e.g. 5 means 11 strikes total per expiry
+# (5 ITM + ATM + 5 OTM). Set to 0 to capture the entire available chain.
+# Recomputed every tick from the live underlying price, so the window
+# tracks the market instead of staying fixed to one strike ladder.
+OPTION_STRIKE_WINDOW: int = int(os.getenv("OPTION_STRIKE_WINDOW", "5"))
 
 
 INDICES: tuple[IndexConfig, ...] = (

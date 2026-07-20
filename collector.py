@@ -177,10 +177,17 @@ class InstrumentCache:
             })
         return out[:1]  # near-month only; widen the slice for more expiries
 
-    def option_instruments(self, idx: IndexConfig) -> list[dict[str, Any]]:
+    def option_instruments(
+        self, idx: IndexConfig, atm_strike: float | None = None
+    ) -> list[dict[str, Any]]:
         """
-        The COMPLETE option chain: every strike, both CE and PE, for the
-        nearest ``idx.option_expiries`` expiries (0 = all expiries).
+        Option instruments for the nearest ``idx.option_expiries`` expiries
+        (0 = all expiries).
+
+        If `atm_strike` is given, the chain is narrowed to a window of
+        ``config.OPTION_STRIKE_WINDOW`` strikes on each side of it
+        (inclusive of the ATM strike itself) — set OPTION_STRIKE_WINDOW=0
+        to capture every available strike instead.
         """
         sel = self._derivatives(idx, "OPT")
         if sel.empty:
@@ -193,6 +200,10 @@ class InstrumentCache:
         if idx.option_expiries > 0:
             expiries = expiries[: idx.option_expiries]
             sel = sel[sel["_expiry_dt"].isin(expiries)]
+
+        if atm_strike is not None and config.OPTION_STRIKE_WINDOW > 0:
+            max_diff = config.OPTION_STRIKE_WINDOW * idx.strike_step
+            sel = sel[(sel["strike"] - atm_strike).abs() <= max_diff + 1e-6]
 
         out: list[dict[str, Any]] = []
         for _, row in sel.iterrows():
@@ -444,8 +455,10 @@ class OptionChainCollector(BaseCollector):
         self._prev_oi: dict[str, int] = {}
 
     @utils.retry()
-    def _fetch(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        insts = self.instruments.option_instruments(self.idx)
+    def _fetch(
+        self, atm_strike: float | None
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        insts = self.instruments.option_instruments(self.idx, atm_strike=atm_strike)
         if not insts:
             raise RuntimeError(f"No option instruments for {self.idx.name}")
         tokens = [{"instrument_token": i["instrument_token"],
@@ -454,10 +467,9 @@ class OptionChainCollector(BaseCollector):
         return insts, quotes
 
     def collect(self, ts: datetime) -> list[dict[str, Any]]:
-        insts, quotes = self._fetch()
-        by_token = {str(_q(q, "instrument_token", "tk", "token")): q for q in quotes}
-
-        # Underlying price: reuse this minute's spot fetch (one extra call max).
+        # Underlying price is needed FIRST to compute the ATM strike and
+        # narrow the chain to config.OPTION_STRIKE_WINDOW strikes either
+        # side of it (reuses this minute's spot fetch — one extra call max).
         underlying: float | None = None
         try:
             spot_rows = self._spot.collect(ts)
@@ -465,6 +477,13 @@ class OptionChainCollector(BaseCollector):
                 underlying = spot_rows[0].get("ltp") or spot_rows[0].get("close")
         except Exception as exc:  # noqa: BLE001
             log.warning("Underlying price unavailable for %s: %s", self.idx.name, exc)
+
+        atm_strike: float | None = None
+        if underlying is not None and self.idx.strike_step:
+            atm_strike = round(underlying / self.idx.strike_step) * self.idx.strike_step
+
+        insts, quotes = self._fetch(atm_strike)
+        by_token = {str(_q(q, "instrument_token", "tk", "token")): q for q in quotes}
 
         rows: list[dict[str, Any]] = []
         ts_str = utils.iso_ts(ts)
