@@ -136,10 +136,11 @@ INDICES: tuple[IndexConfig, ...] = (
     # toward the configured 60s interval. Re-add here if needed later:
     #   IndexConfig("finnifty", "Nifty Fin Service", "nse_cm", "FINNIFTY", "nse_fo", strike_step=50),
     #   IndexConfig("midcpnifty", "NIFTY MID SELECT", "nse_cm", "MIDCPNIFTY", "nse_fo", strike_step=25),
-    # SENSEX is optional — flip collect_* to True if your subscription covers BSE.
+    # SENSEX: spot + options (bse_fo) — options confirmed working with this
+    # account per the neogreeks project. Futures stay off.
     IndexConfig(
         "sensex", "SENSEX", "bse_cm", "SENSEX", "bse_fo",
-        collect_futures=False, collect_options=False, strike_step=100,
+        collect_futures=False, collect_options=True, strike_step=100,
     ),
 )
 
