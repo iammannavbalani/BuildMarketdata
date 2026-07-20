@@ -186,8 +186,10 @@ class InstrumentCache:
         if sel.empty:
             log.error("No option instruments found for %s", idx.name)
             return []
-        expiries = sel["_expiry_dt"].dropna().unique()
-        expiries.sort()
+        # .unique() on a datetime column returns a pandas DatetimeArray,
+        # which has no in-place .sort() (that's an ndarray/list method) —
+        # sort via a DatetimeIndex instead.
+        expiries = pd.DatetimeIndex(sel["_expiry_dt"].dropna().unique()).sort_values()
         if idx.option_expiries > 0:
             expiries = expiries[: idx.option_expiries]
             sel = sel[sel["_expiry_dt"].isin(expiries)]
