@@ -20,4 +20,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Railway injects $PORT; default 8000 for local runs.
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# --ws none: our FastAPI app has no WebSocket routes, and uvicorn's
+# auto-detection otherwise imports websockets.frames at boot, which
+# doesn't exist in websockets==8.1 (hard-pinned by neo_api_client) —
+# that import failure silently kills the server before it binds the
+# port, which is why /health was timing out.
+CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000} --ws none"]
