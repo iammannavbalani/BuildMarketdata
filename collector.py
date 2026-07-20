@@ -140,7 +140,9 @@ class InstrumentCache:
             # Kotak's scrip master stores some strikes scaled x100 (e.g.
             # BANKNIFTY 50000 becomes 5000000) — confirmed against the
             # working neogreeks logic, which descales anything > 1,000,000.
-            out["strike"] = strike_num.where(strike_num <= 1_000_000, strike_num / 100)
+            out["strike"] = strike_num.astype(float).where(
+                strike_num <= 1_000_000, strike_num / 100
+            )
 
         if "expiry" in out.columns:
             out["_expiry_dt"] = cls._parse_expiry_column(out["expiry"])
@@ -223,15 +225,39 @@ class InstrumentCache:
             "exchange_segment": idx.spot_exchange,
         }
 
-    def _derivatives(self, idx: IndexConfig, inst_prefix: str) -> pd.DataFrame:
-        """All derivative rows for an underlying (FUT* or OPT*), expiry-sorted."""
+    def _derivatives(self, idx: IndexConfig, kind: str) -> pd.DataFrame:
+        """
+        All derivative rows for an underlying, expiry-sorted.
+
+        `kind` is "OPT" or "FUT". Selection deliberately does NOT rely on
+        the instrument-type column: NSE uses OPTIDX/FUTIDX there but BSE
+        uses different codes (IO/IF), which silently produced zero SENSEX
+        options. The confirmed-working neogreeks approach — used here —
+        is symbol match + option_type CE/PE presence (options) or absence
+        (futures), which is exchange-agnostic.
+        """
         df = self._load_segment(idx.derivative_exchange)
-        if "inst_type" not in df.columns or "symbol" not in df.columns:
+        if "symbol" not in df.columns:
             return pd.DataFrame()
-        sel = df[
-            df["inst_type"].str.startswith(inst_prefix, na=False)
-            & (df["symbol"] == idx.derivative_symbol.upper())
-        ].copy()
+        sel = df[df["symbol"] == idx.derivative_symbol.upper()].copy()
+        if sel.empty:
+            return sel
+
+        if "option_type" in sel.columns:
+            is_option = sel["option_type"].isin(("CE", "PE"))
+        else:
+            is_option = pd.Series(False, index=sel.index)
+        if kind == "OPT":
+            sel = sel[is_option]
+        else:  # FUT: derivative rows that are not options
+            sel = sel[~is_option]
+            if "inst_type" in sel.columns:
+                # Keep recognisable futures codes when present (NSE FUTIDX,
+                # BSE IF); rows with blank inst_type are kept as-is.
+                known = sel["inst_type"].str.startswith(("FUT", "IF"), na=False)
+                blank = sel["inst_type"].isin(("", "NAN", "NONE"))
+                sel = sel[known | blank]
+
         if sel.empty or "_expiry_dt" not in sel.columns:
             return sel
         # Rows whose expiry didn't parse / parsed to a stale date are
@@ -303,6 +329,20 @@ class InstrumentCache:
 # ---------------------------------------------------------------------------
 # Quote parsing helpers
 # ---------------------------------------------------------------------------
+
+
+# Token keys seen in quote responses across SDK versions — matches the
+# confirmed-working list in neogreeks/oi_monitor.py.
+_TOKEN_KEYS = ("instrument_token", "token", "tk", "pTkn", "pSymbol", "exchange_token")
+
+
+def _token_of(quote: dict[str, Any]) -> str:
+    """Extract the instrument token from a quote dict, whatever it's called."""
+    for k in _TOKEN_KEYS:
+        v = quote.get(k)
+        if v not in (None, ""):
+            return str(v)
+    return ""
 
 
 def _q(quote: dict[str, Any], *aliases: str) -> Any:
@@ -396,15 +436,15 @@ class SpotCollector(BaseCollector):
                 "exchange_timestamp": _exchange_ts(q),
                 "index": self.idx.name,
                 "open": utils.to_float(_q(q, "open", "open_price", "o")),
-                "high": utils.to_float(_q(q, "high", "high_price", "h")),
-                "low": utils.to_float(_q(q, "low", "low_price", "l")),
+                "high": utils.to_float(_q(q, "high", "high_price", "h", "dayHigh")),
+                "low": utils.to_float(_q(q, "low", "low_price", "l", "dayLow")),
                 "close": utils.to_float(_q(q, "close", "close_price", "c", "prev_close")),
-                "ltp": utils.to_float(_q(q, "ltp", "last_traded_price", "last_price")),
-                "volume": utils.to_int(_q(q, "volume", "vol", "total_traded_volume", "vtt")),
+                "ltp": utils.to_float(_q(q, "ltp", "last_traded_price", "last_price", "lp", "ltP")),
+                "volume": utils.to_int(_q(q, "volume", "vol", "total_traded_volume", "vtt", "ttq", "last_volume")),
                 "vwap": utils.to_float(_q(q, "vwap", "average_traded_price", "atp")),
                 "average_price": utils.to_float(_q(q, "average_price", "avg_price", "atp")),
                 "num_trades": utils.to_int(_q(q, "num_trades", "total_trades", "no_of_trades")),
-                "instrument_token": _q(q, "instrument_token", "tk", "token"),
+                "instrument_token": _token_of(q) or None,
             })
         return rows
 
@@ -435,15 +475,15 @@ class FutureCollector(BaseCollector):
         tokens = [{"instrument_token": i["instrument_token"],
                    "exchange_segment": i["exchange_segment"]} for i in insts]
         quotes = self.session.quotes(tokens, quote_type="all")
-        by_token = {str(_q(q, "instrument_token", "tk", "token")): q for q in quotes}
+        by_token = {_token_of(q): q for q in quotes}
         return [(i, by_token.get(i["instrument_token"], {})) for i in insts]
 
     def collect(self, ts: datetime) -> list[dict[str, Any]]:
         rows = []
         for inst, q in self._fetch():
             token = inst["instrument_token"]
-            oi = utils.to_int(_q(q, "oi", "open_interest", "openInterest"))
-            oi_change = utils.to_int(_q(q, "oi_change", "change_in_oi", "oiChg"))
+            oi = utils.to_int(_q(q, "open_int", "openInterest", "oi", "open_interest", "opInt", "OI"))
+            oi_change = utils.to_int(_q(q, "changeinOpenInterest", "oiChange", "change_in_oi", "oi_change", "oiChg"))
             if oi_change is None and oi is not None and token in self._prev_oi:
                 oi_change = oi - self._prev_oi[token]
             if oi is not None:
@@ -455,12 +495,12 @@ class FutureCollector(BaseCollector):
                 "index": self.idx.name,
                 "symbol": inst["symbol"],
                 "expiry": inst["expiry"],
-                "ltp": utils.to_float(_q(q, "ltp", "last_traded_price", "last_price")),
+                "ltp": utils.to_float(_q(q, "ltp", "last_traded_price", "last_price", "lp", "ltP")),
                 "open": utils.to_float(_q(q, "open", "open_price", "o")),
-                "high": utils.to_float(_q(q, "high", "high_price", "h")),
-                "low": utils.to_float(_q(q, "low", "low_price", "l")),
+                "high": utils.to_float(_q(q, "high", "high_price", "h", "dayHigh")),
+                "low": utils.to_float(_q(q, "low", "low_price", "l", "dayLow")),
                 "close": utils.to_float(_q(q, "close", "close_price", "c", "prev_close")),
-                "volume": utils.to_int(_q(q, "volume", "vol", "total_traded_volume", "vtt")),
+                "volume": utils.to_int(_q(q, "volume", "vol", "total_traded_volume", "vtt", "ttq", "last_volume")),
                 "oi": oi,
                 "oi_change": oi_change,
                 "bid": utils.to_float(bid),
@@ -497,13 +537,13 @@ class VixCollector(BaseCollector):
                 "timestamp": utils.iso_ts(ts),
                 "exchange_timestamp": _exchange_ts(q),
                 "open": utils.to_float(_q(q, "open", "open_price", "o")),
-                "high": utils.to_float(_q(q, "high", "high_price", "h")),
-                "low": utils.to_float(_q(q, "low", "low_price", "l")),
+                "high": utils.to_float(_q(q, "high", "high_price", "h", "dayHigh")),
+                "low": utils.to_float(_q(q, "low", "low_price", "l", "dayLow")),
                 "close": utils.to_float(_q(q, "close", "close_price", "c", "prev_close")),
-                "ltp": utils.to_float(_q(q, "ltp", "last_traded_price", "last_price")),
-                "volume": utils.to_int(_q(q, "volume", "vol", "total_traded_volume", "vtt")),
+                "ltp": utils.to_float(_q(q, "ltp", "last_traded_price", "last_price", "lp", "ltP")),
+                "volume": utils.to_int(_q(q, "volume", "vol", "total_traded_volume", "vtt", "ttq", "last_volume")),
                 "vwap": utils.to_float(_q(q, "vwap", "average_traded_price", "atp")),
-                "instrument_token": _q(q, "instrument_token", "tk", "token"),
+                "instrument_token": _token_of(q) or None,
             })
         return rows
 
@@ -559,15 +599,15 @@ class OptionChainCollector(BaseCollector):
             atm_strike = round(underlying / self.idx.strike_step) * self.idx.strike_step
 
         insts, quotes = self._fetch(atm_strike)
-        by_token = {str(_q(q, "instrument_token", "tk", "token")): q for q in quotes}
+        by_token = {_token_of(q): q for q in quotes}
 
         rows: list[dict[str, Any]] = []
         ts_str = utils.iso_ts(ts)
         for inst in insts:
             token = inst["instrument_token"]
             q = by_token.get(token, {})
-            oi = utils.to_int(_q(q, "oi", "open_interest", "openInterest"))
-            oi_change = utils.to_int(_q(q, "oi_change", "change_in_oi", "oiChg"))
+            oi = utils.to_int(_q(q, "open_int", "openInterest", "oi", "open_interest", "opInt", "OI"))
+            oi_change = utils.to_int(_q(q, "changeinOpenInterest", "oiChange", "change_in_oi", "oi_change", "oiChg"))
             if oi_change is None and oi is not None and token in self._prev_oi:
                 oi_change = oi - self._prev_oi[token]
             if oi is not None:
@@ -580,16 +620,16 @@ class OptionChainCollector(BaseCollector):
                 "expiry": inst["expiry"],
                 "strike": inst["strike"],
                 "type": inst["option_type"],
-                "ltp": utils.to_float(_q(q, "ltp", "last_traded_price", "last_price")),
+                "ltp": utils.to_float(_q(q, "ltp", "last_traded_price", "last_price", "lp", "ltP")),
                 "bid": utils.to_float(bid),
                 "ask": utils.to_float(ask),
                 "bid_qty": utils.to_int(bid_qty),
                 "ask_qty": utils.to_int(ask_qty),
                 "last_qty": utils.to_int(_q(q, "last_qty", "last_traded_quantity", "ltq")),
-                "volume": utils.to_int(_q(q, "volume", "vol", "total_traded_volume", "vtt")),
+                "volume": utils.to_int(_q(q, "volume", "vol", "total_traded_volume", "vtt", "ttq", "last_volume")),
                 "oi": oi,
                 "oi_change": oi_change,
-                "iv": utils.to_float(_q(q, "iv", "implied_volatility", "impliedVolatility")),
+                "iv": utils.to_float(_q(q, "impliedVolatility", "iv", "implied_volatility", "impV")),
                 "delta": utils.to_float(_q(q, "delta")),
                 "gamma": utils.to_float(_q(q, "gamma")),
                 "theta": utils.to_float(_q(q, "theta")),

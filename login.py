@@ -222,18 +222,23 @@ class NeoSession:
 
     @staticmethod
     def _unwrap_quotes(resp: Any) -> list[dict[str, Any]]:
-        """Normalise SDK response shapes to a plain list of quote dicts."""
+        """
+        Normalise SDK response shapes to a plain list of quote dicts.
+        Key list ("data"/"Success"/"message", dict-of-dicts unwrapping)
+        matches the confirmed-working handling in neogreeks/oi_monitor.py.
+        """
         if resp is None:
             return []
         if isinstance(resp, list):
             return [r for r in resp if isinstance(r, dict)]
         if isinstance(resp, dict):
-            for key in ("message", "data", "quotes"):
+            for key in ("data", "Success", "message", "quotes"):
                 inner = resp.get(key)
+                if isinstance(inner, dict):
+                    # dict keyed by token -> take the values
+                    inner = list(inner.values())
                 if isinstance(inner, list):
                     return [r for r in inner if isinstance(r, dict)]
-                if isinstance(inner, dict):
-                    return [inner]
             if resp.get("error"):
                 raise RuntimeError(f"Quote API error: {resp['error']}")
             return [resp]
