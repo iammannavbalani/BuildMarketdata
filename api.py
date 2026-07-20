@@ -84,8 +84,12 @@ app = FastAPI(title="MarketData Collector API", version="1.0.0", lifespan=lifesp
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.API_CORS_ORIGINS,
-    allow_methods=["GET"],
-    allow_headers=["*"],
+    # Explicit GET + OPTIONS: Starlette's CORS middleware answers preflight
+    # OPTIONS requests itself, but returns 400 if the browser's requested
+    # method isn't in this list — OPTIONS must be listed even though we
+    # never route it ourselves.
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["X-API-Key", "Content-Type"],
 )
 
 # ---------------------------------------------------------------------------
