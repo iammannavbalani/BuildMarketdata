@@ -43,11 +43,16 @@ class NeoSession:
         "not authorized", "invalid session", "401", "invalid jwt",
     )
 
+    # Fallback used if login doesn't surface a baseUrl (matches the
+    # confirmed-working value from the neogreeks project).
+    _DEFAULT_BASE_URL = "https://gw-napi.kotaksecurities.com"
+
     def __init__(self) -> None:
         self._client: Any = None
         self._lock = threading.Lock()
         self.reconnect_count: int = 0
         self.total_requests: int = 0
+        self.base_url: str = self._DEFAULT_BASE_URL
 
     # ------------------------------------------------------------------ #
     # Login / reconnect
@@ -105,7 +110,27 @@ class NeoSession:
         step2 = self._client.totp_validate(mpin=creds.mpin)
         if isinstance(step2, dict) and step2.get("error"):
             raise AuthenticationError(f"totp_validate failed: {step2['error']}")
-        log.info("Login successful.")
+
+        self.base_url = self._deep_find(step2, "baseUrl") or self._DEFAULT_BASE_URL
+        log.info("Login successful. base_url=%s", self.base_url)
+
+    @classmethod
+    def _deep_find(cls, d: Any, key: str) -> Any:
+        """Recursively search a nested dict/list response for `key` (any casing/underscores)."""
+        norm = key.lower().replace("_", "")
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if k.lower().replace("_", "") == norm:
+                    return v
+                found = cls._deep_find(v, key)
+                if found:
+                    return found
+        elif isinstance(d, list):
+            for item in d:
+                found = cls._deep_find(item, key)
+                if found:
+                    return found
+        return None
 
     def ensure_login(self) -> None:
         """Login if we have no live client (idempotent)."""
@@ -213,6 +238,48 @@ class NeoSession:
                 raise RuntimeError(f"Quote API error: {resp['error']}")
             return [resp]
         return []
+
+    def quotes_neo_symbol(
+        self, pairs: list[tuple[str, str]], quote_type: str = "all"
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch quotes by index/symbol NAME via the raw REST "neosymbol"
+        endpoint, e.g. pairs=[("nse_cm", "Nifty 50"), ("nse_cm", "INDIA VIX")].
+
+        This is the confirmed-working path for spot indices and India
+        VIX (verified against the neogreeks/oi_monitor.py production
+        code): the SDK's client.quotes() is built around numeric scrip
+        tokens for futures/options, but index spot values are fetched
+        through this endpoint with the consumer_key sent directly as the
+        Authorization header (per that proven implementation — no bearer
+        token wrapping).
+
+        Returns a flat list of quote dicts, one per requested pair, in
+        the same order as `pairs`.
+        """
+        import requests
+
+        self.ensure_login()
+        joined = ",".join(f"{seg}|{name}" for seg, name in pairs)
+        url = f"{self.base_url}/script-details/1.0/quotes/neosymbol/{joined}/{quote_type}"
+        headers = {"Authorization": config.CREDENTIALS.consumer_key}
+
+        self.total_requests += 1
+        resp = requests.get(url, headers=headers, timeout=config.REQUEST_TIMEOUT)
+
+        if resp.status_code == 401 or resp.status_code == 403:
+            self.reconnect()
+            headers = {"Authorization": config.CREDENTIALS.consumer_key}
+            self.total_requests += 1
+            resp = requests.get(url, headers=headers, timeout=config.REQUEST_TIMEOUT)
+
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            data = data.get("data", data)
+        if not isinstance(data, list):
+            return []
+        return [d for d in data if isinstance(d, dict)]
 
     def scrip_master(self, exchange_segment: str) -> Any:
         """Return the scrip-master for an exchange segment (URL, path or data)."""

@@ -132,8 +132,10 @@ INDICES: tuple[IndexConfig, ...] = (
     ),
 )
 
-# India VIX (spot-style index, no derivatives collected here)
-VIX_SYMBOL: str = "India VIX"
+# India VIX (spot-style index, no derivatives collected here).
+# Exact casing "INDIA VIX" matches the confirmed-working neosymbol query
+# from the neogreeks/oi_monitor.py production code.
+VIX_SYMBOL: str = "INDIA VIX"
 VIX_EXCHANGE: str = "nse_cm"
 
 # ---------------------------------------------------------------------------

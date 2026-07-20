@@ -291,10 +291,12 @@ class SpotCollector(BaseCollector):
 
     @utils.retry()
     def _fetch(self) -> list[dict[str, Any]]:
-        token = self.instruments.spot_token(self.idx)
-        if token is None:
-            raise RuntimeError(f"No spot token for {self.idx.name}")
-        return self.session.quotes([token], quote_type="all", is_index=True)
+        # Confirmed-working path (per neogreeks/oi_monitor.py production
+        # code): spot indices are fetched by NAME via the raw REST
+        # "neosymbol" endpoint, not the SDK's token-based quotes().
+        return self.session.quotes_neo_symbol(
+            [(self.idx.spot_exchange, self.idx.spot_symbol)], quote_type="all"
+        )
 
     def collect(self, ts: datetime) -> list[dict[str, Any]]:
         quotes = self._fetch()
@@ -395,16 +397,9 @@ class VixCollector(BaseCollector):
 
     @utils.retry()
     def _fetch(self) -> list[dict[str, Any]]:
-        # VIX token resolution mirrors a spot index lookup.
-        vix_cfg = IndexConfig(
-            "india_vix", config.VIX_SYMBOL, config.VIX_EXCHANGE,
-            "INDIAVIX", config.VIX_EXCHANGE,
-            collect_futures=False, collect_options=False,
+        return self.session.quotes_neo_symbol(
+            [(config.VIX_EXCHANGE, config.VIX_SYMBOL)], quote_type="all"
         )
-        token = self.instruments.spot_token(vix_cfg)
-        if token is None:
-            raise RuntimeError("India VIX token not found")
-        return self.session.quotes([token], quote_type="all", is_index=True)
 
     def collect(self, ts: datetime) -> list[dict[str, Any]]:
         rows = []

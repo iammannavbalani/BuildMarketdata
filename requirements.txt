@@ -2,10 +2,15 @@
 pandas>=2.2
 neo_api_client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.1
 pyotp>=2.9  # generates the TOTP 2FA code from KOTAK_TOTP_SECRET
+requests>=2.32  # raw REST fallback for spot/VIX quotes (see login.py quotes_neo_symbol)
 
 # API server (Railway)
+# NOTE: plain uvicorn, not uvicorn[standard] — the "standard" extra pulls
+# in websockets>=10.4, which conflicts with neo_api_client's hard pin of
+# websockets==8.1 (used internally by the Neo SDK for its own market-data
+# feed, unrelated to our REST-only FastAPI app).
 fastapi>=0.111
-uvicorn[standard]>=0.30
+uvicorn>=0.30
 
 # Optional daily Google Drive backup (only used if DRIVE_BACKUP_ENABLED=1)
 google-api-python-client>=2.130
