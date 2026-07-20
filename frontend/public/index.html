@@ -65,6 +65,7 @@
       <input id="tailN" type="number" value="50" min="1" max="5000" style="width:80px" title="rows">
       <button onclick="previewFile()">Preview last N rows</button>
       <button onclick="downloadFile()">Download CSV</button>
+      <button class="primary" onclick="downloadDayZip()">Download All (ZIP)</button>
     </div>
     <div class="scroll"><table id="dataTable"></table></div>
   </div>
@@ -163,6 +164,16 @@ function downloadFile(){
     .then(r => r.blob())
     .then(b => { const a=document.createElement("a");
       a.href=URL.createObjectURL(b); a.download=`${day}_${file}`; a.click(); })
+    .catch(showErr);
+}
+
+function downloadDayZip(){
+  const day = $("daySel").value;
+  if(!day) return;
+  fetch(`${cfg.base}/days/${day}/zip`, { headers: cfg.key ? {"X-API-Key": cfg.key} : {} })
+    .then(r => { if(!r.ok) throw new Error(`zip → HTTP ${r.status}`); return r.blob(); })
+    .then(b => { const a=document.createElement("a");
+      a.href=URL.createObjectURL(b); a.download=`marketdata_${day}.zip`; a.click(); })
     .catch(showErr);
 }
 

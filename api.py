@@ -14,6 +14,7 @@ GET /days                            available data days (from data/YYYY/MM/DD)
 GET /days/{date}/files               files + sizes for one day
 GET /days/{date}/files/{name}        download a CSV / metadata.json
 GET /days/{date}/files/{name}/tail   last N rows as JSON (dashboard tables)
+GET /days/{date}/zip                 download every file for the day as one .zip
 
 Security: set the API_KEY env var to require an ``X-API-Key`` header on
 every endpoint except /health. CORS origins come from API_CORS_ORIGINS.
@@ -27,7 +28,9 @@ from __future__ import annotations
 import csv
 import json
 import re
+import tempfile
 import threading
+import zipfile
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -37,6 +40,7 @@ from typing import Any, AsyncIterator
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 import config
 import utils
@@ -212,6 +216,37 @@ def download_file(day: str, name: str) -> FileResponse:
     path = _safe_file(_day_dir(day), name)
     media = "application/json" if path.suffix == ".json" else "text/csv"
     return FileResponse(path, media_type=media, filename=path.name)
+
+
+@app.get("/days/{day}/zip", dependencies=[Depends(require_api_key)])
+def download_day_zip(day: str) -> FileResponse:
+    """
+    Bundle every file for one day (all index CSVs + metadata.json) into
+    a single .zip for one-click download from the dashboard — avoids
+    downloading each index's CSV separately.
+
+    Built into a temp file (not held in memory) so large days don't
+    balloon server RAM; the temp file is deleted automatically once the
+    response has been streamed to the client.
+    """
+    d = _day_dir(day)
+    files = [f for f in sorted(d.iterdir()) if f.is_file()]
+    if not files:
+        raise HTTPException(status_code=404, detail=f"No files for {day}")
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
+    tmp_path = Path(tmp.name)
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(f, arcname=f.name)
+
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=f"marketdata_{day}.zip",
+        background=BackgroundTask(tmp_path.unlink, missing_ok=True),
+    )
 
 
 @app.get("/days/{day}/files/{name}/tail", dependencies=[Depends(require_api_key)])

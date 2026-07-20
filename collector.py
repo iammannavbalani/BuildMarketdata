@@ -63,8 +63,8 @@ class InstrumentCache:
         "trading_symbol": ("pTrdSymbol", "tradingsymbol", "ptrdsymbol"),
         "inst_type": ("pInstType", "instrumenttype", "pinsttype", "instname"),
         "expiry": ("pExpiryDate", "expiry", "pexpirydate", "lexpirydate"),
-        "strike": ("dStrikePrice;", "dStrikePrice", "strikeprice", "dstrikeprice"),
-        "option_type": ("pOptionType", "optiontype", "poptiontype"),
+        "strike": ("dStrikePrice;", "dStrikePrice", "pStrkPrc", "strikeprice", "dstrikeprice"),
+        "option_type": ("pOptionType", "pOptTp", "optiontype", "poptiontype"),
         "desc": ("pDesc", "pdesc", "description"),
     }
 
@@ -113,6 +113,13 @@ class InstrumentCache:
             return pd.read_csv(raw, low_memory=False)  # local path
         raise RuntimeError(f"Unrecognised scrip-master payload: {type(raw)}")
 
+    # Confirmed-working expiry string formats from the neogreeks/
+    # oi_monitor.py production code (Kotak's scrip master stores expiry
+    # as a formatted date string, NOT a numeric epoch).
+    _EXPIRY_FORMATS: tuple[str, ...] = (
+        "%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y",
+    )
+
     @classmethod
     def _normalise(cls, df: pd.DataFrame) -> pd.DataFrame:
         """Map vendor column names to canonical names; keep originals too."""
@@ -127,9 +134,42 @@ class InstrumentCache:
         for col in ("symbol", "trading_symbol", "inst_type", "option_type", "desc"):
             if col in out.columns:
                 out[col] = out[col].astype(str).str.strip().str.upper()
+
         if "strike" in out.columns:
-            out["strike"] = pd.to_numeric(out["strike"], errors="coerce")
+            strike_num = pd.to_numeric(out["strike"], errors="coerce")
+            # Kotak's scrip master stores some strikes scaled x100 (e.g.
+            # BANKNIFTY 50000 becomes 5000000) — confirmed against the
+            # working neogreeks logic, which descales anything > 1,000,000.
+            out["strike"] = strike_num.where(strike_num <= 1_000_000, strike_num / 100)
+
+        if "expiry" in out.columns:
+            out["_expiry_dt"] = cls._parse_expiry_column(out["expiry"])
+
         return out
+
+    @classmethod
+    def _parse_expiry_column(cls, col: pd.Series) -> pd.Series:
+        """
+        Parse Kotak's expiry date strings using the confirmed-working
+        format list, trying each in turn rather than pandas' generic
+        auto-parser (which can silently misread ambiguous formats, e.g.
+        a 2-digit year, and produce a wildly wrong — but valid-looking —
+        date). Anything that still can't be parsed, or parses to a date
+        clearly in the past, is left as NaT (excluded) rather than guessed.
+        """
+        result = pd.Series(pd.NaT, index=col.index, dtype="datetime64[ns]")
+        text = col.astype(str)
+        for fmt in cls._EXPIRY_FORMATS:
+            mask = result.isna()
+            if not mask.any():
+                break
+            result.loc[mask] = pd.to_datetime(text[mask], format=fmt, errors="coerce")
+        mask = result.isna()
+        if mask.any():
+            result.loc[mask] = pd.to_datetime(text[mask], errors="coerce")
+
+        cutoff = pd.Timestamp(utils.today_ist()) - pd.Timedelta(days=1)
+        return result.where(result >= cutoff)
 
     # -- resolution --------------------------------------------------------
     def spot_token(self, idx: IndexConfig) -> dict[str, str] | None:
@@ -155,13 +195,12 @@ class InstrumentCache:
             df["inst_type"].str.startswith(inst_prefix, na=False)
             & (df["symbol"] == idx.derivative_symbol.upper())
         ].copy()
-        if sel.empty or "expiry" not in sel.columns:
+        if sel.empty or "_expiry_dt" not in sel.columns:
             return sel
-        sel["_expiry_dt"] = pd.to_datetime(
-            pd.to_numeric(sel["expiry"], errors="coerce"), unit="s", errors="coerce"
-        )
-        if sel["_expiry_dt"].isna().all():  # expiry stored as a date string
-            sel["_expiry_dt"] = pd.to_datetime(sel["expiry"], errors="coerce")
+        # Rows whose expiry didn't parse / parsed to a stale date are
+        # excluded here (rather than earlier) so a scrip-master-wide
+        # parsing hiccup only drops the affected rows, not the segment.
+        sel = sel[sel["_expiry_dt"].notna()]
         return sel.sort_values("_expiry_dt")
 
     def future_instruments(self, idx: IndexConfig) -> list[dict[str, Any]]:
